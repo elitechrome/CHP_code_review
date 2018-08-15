@@ -3,8 +3,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define PCAN_CHANNEL PCAN_USBBUS1
-#define PCAN_BAUDRATE PCAN_BAUD_500K
+//#define PCAN_CHANNEL PCAN_USBBUS1
+//#define PCAN_BAUDRATE PCAN_BAUD_500K
 
 #ifndef __APPLE__
 #include <asm/types.h>
