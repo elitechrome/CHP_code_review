@@ -8,13 +8,7 @@
 #include <iostream>
 #include <pthread.h>
 #include "can_mac_val.h"
-
-//#define CAN_CONTROL_ENABLE
-#define CAN_CHASSIS_ENABLE
-
-#define CONTROL_CAN_DEVICE PCAN_USBBUS1
-#define CHASSIS_CAN_DEVICE PCAN_USBBUS1
-#define PCAN_BAUD_RATE PCAN_BAUD_500K
+#include "pd_control.h"
 
 #define APM_En            (BYTE)0x01
 #define APM_D_En          (BYTE)0x00
@@ -24,11 +18,19 @@
 #define ACC_StopReq_En    (BYTE)0x01
 #define ACC_StopReq_D_En  (BYTE)0x00
 
+#define CONTROL_CAN_DEVICE PCAN_USBBUS1
+#define CHASSIS_CAN_DEVICE PCAN_USBBUS1
+#define PCAN_BAUD_RATE PCAN_BAUD_500K
+
+#define CAN_CONTROL_ENABLE
+//#define CAN_CHASSIS_ENABLE
+
 // print_ control can flag
 bool print_can_control_state_flag = 0;
 bool print_vehicle_speed_flag = 0;
 bool print_alive_count_flag = 0;
 bool print_steer_angle_flag = 0;
+bool print_cluster_speed_display_flag = 1;
 
 // print_ chassis can flag
 bool print_driving_tq_flag = 0;
@@ -43,10 +45,23 @@ bool print_whl_pul_flag = 0;
 u_int16_t APM_state = APM_D_En;   // APM_D_En, APM_En
 u_int16_t ASM_state = ASM_D_En;   // ASM_D_En, ASM_En
 
-// control value
+// control param
 u_int8_t APM_Slevel_val = 250;  // 100 ~ 250, (if this value set to 0, APM set to 150)
-u_int16_t steer_angle_ = 20;    // 0x14 // value * 10 => 0xc8
-u_int16_t accel_value_ = -1;
+u_int16_t Steer_Cmd = 20;    // 0x14 // value * 10 => 0xc8
+float aReqMax_Cmd = -1.;       // -5.00 ~ 5.00 소수점 2째 자리까지 가능
+int cluster_speed_display_value = 10;
+
+// PD control param
+bool speed_pid_control_enable_flag = 0;
+int target_vehicle_speed = 20;             // 현재 속도
+int real_vehicle_speed = 0;               // 타겟 속도
+float K_p = 0.1;
+float K_d = 0.5;
+
+// 0.2, 0.5 -> 15
+
+// CAN error flag (전역으로 선언)
+bool can_error_flag = 0;
 
 // Control CAN
 void Mo_Conf(CAN_AVL &can_);
@@ -65,11 +80,48 @@ void Brake_Pressure(CAN_AVL can_);                  // ID : 0x371, LEN : 8
 void WHL_Speed(CAN_AVL can_);                       // ID : 0x386, LEN : 8, km/h
 void WHL_PUL(CAN_AVL can_);                         // ID : 0x387, LEN : 6
 
-static BYTE alive_count = 0;
+// pthread function
+void* CAN_RW(void *can_error_flag_);
+
+static BYTE CAN_alive_count = 0;
 
 int main()
 {
-    bool can_error_flag = 0;
+    PD_CONTROL pd_control;
+    
+    int thr_id = 0;
+    pthread_t p_thread[1];
+    int status;
+
+    // CAN Read Write
+    thr_id = pthread_create(&p_thread[0], NULL, CAN_RW, (void *)can_error_flag);
+
+    while(1)
+    {
+        /*
+         차량 제어 코드 작성
+         */
+        
+        // S_t, K_p, K_d는 상수, S_r은 실시간 CAN receive data. S_r에 뮤텍스 들어갈 수 도 있음.
+        if(speed_pid_control_enable_flag == 1)
+        {
+            aReqMax_Cmd = pd_control.MV_Cal_Func(target_vehicle_speed, real_vehicle_speed, K_p, K_d);
+            aReqMax_Cmd = aReqMax_Cmd > 5 ? 5 : aReqMax_Cmd;
+            aReqMax_Cmd = aReqMax_Cmd < -5 ? -5 : aReqMax_Cmd;
+        }
+        
+        usleep(1);
+        if(can_error_flag == true)  break;
+    }
+    
+    pthread_join(p_thread[0], (void **) &status);
+
+    return 0;
+}
+
+void* CAN_RW(void *can_error_flag_)
+{
+    printf("can_error_flag : %d\n", can_error_flag_);
     
 #ifdef CAN_CONTROL_ENABLE
     CAN_AVL can_control(CONTROL_CAN_DEVICE, PCAN_BAUD_RATE);      // 제어 캔. write/read
@@ -82,11 +134,6 @@ int main()
     memset(&can_chassis.message, 0, sizeof(TPCANMsg));
     can_chassis.PEAKCAN_TO_SOCKETCAN();
 #endif
-    
-
-
-
-    
     
     while(1)
     {
@@ -146,12 +193,15 @@ int main()
         //////////////////////////////////////////////
         //////////////////////////////////////////////
 #endif
-        if(can_error_flag == true)
+        
+
+        if((bool)can_error_flag_ == true)
             break;
         
-//        usleep(20000);
+        //        usleep(20000);
     }
-    return 0;
+    
+    //return 0; // 원래는 해줘야함. return (void *)value;
 }
 
 
@@ -176,7 +226,7 @@ void Mo_Conf(CAN_AVL &can_)
     can_.frame.data[4] = 0;
     can_.frame.data[5] = 0;
     can_.frame.data[6] = 0;
-    can_.frame.data[7] = alive_count++;             // alive-count    can.write();
+    can_.frame.data[7] = CAN_alive_count++;             // alive-count    can.write();
     
     //    can_print(can_);
     
@@ -186,7 +236,6 @@ void Mo_Conf(CAN_AVL &can_)
 
 void Mo_Val(CAN_AVL &can_)
 {
-    
     can_.can_memset();      // data만 memset
     
     unsigned long tmp_id = 0x157;
@@ -194,15 +243,15 @@ void Mo_Val(CAN_AVL &can_)
     
     can_.write_param(tmp_id, tmp_dlc);
     
-    can_.frame.data[0] = (u_int8_t)(((10*steer_angle_) & 0x00ff));
+    can_.frame.data[0] = (u_int8_t)(((10*Steer_Cmd) & 0x00ff));
     // Steer_Cmd    Andgle of Steering      10 * (real_value)   [-500, 500]
-    can_.frame.data[1] = (u_int8_t)((((10*steer_angle_) & 0xff00) >> 8));
+    can_.frame.data[1] = (u_int8_t)((((10*Steer_Cmd) & 0xff00) >> 8));
     // Steer_Cmd
-    can_.frame.data[2] = 100;
+    can_.frame.data[2] = cluster_speed_display_value;
     //can_.message.DATA[2] = (u_int8_t)10 & 0x00ff;
-    can_.frame.data[3] = (u_int8_t)((u_int16_t)(100 * (accel_value_ + 10.23)) & 0x00ff);
+    can_.frame.data[3] = (u_int8_t)((u_int16_t)(100 * (aReqMax_Cmd + 10.23)) & 0x00ff);
     // aReqMax_Cmd  Acceleration Control    100*((value)+10.23) [-5.0, 5.0]     멈추려면 -값 주면 된다고 함.
-    can_.frame.data[4] = (u_int8_t)(((u_int16_t)(100 * (accel_value_ + 10.23)) >> 8) & 0x00ff);
+    can_.frame.data[4] = (u_int8_t)(((u_int16_t)(100 * (aReqMax_Cmd + 10.23)) >> 8) & 0x00ff);
     // aReqMax_Cmd
     can_.frame.data[5] = 0;
     can_.frame.data[6] = 0;
@@ -268,7 +317,8 @@ bool Report_ASM(CAN_AVL &can_)      // id = 0x711
     if(print_vehicle_speed_flag == 1)    printf("Vehicle Speed \t\t: %d\n", ASM_Fd_VSpeed_);
     if(print_alive_count_flag == 1)    printf("Alive-count value \t\t: %d\n", Mo_Fd_AlvCnt_);
     
-    
+    if(speed_pid_control_enable_flag == 1) real_vehicle_speed = ASM_Fd_VSpeed_;
+    if(print_cluster_speed_display_flag == 1) cluster_speed_display_value = ASM_Fd_VSpeed_;
     //printf("APM_Fd_En_ \t= %d \t\t APM_Fd_Override \t=%d\n", APM_Fd_En_, APM_Fd_Override);
     
     return can_error_flag_;
