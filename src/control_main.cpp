@@ -6,7 +6,10 @@
  */
 
 #include <iostream>
-#include <pthread.h>
+#include <thread>
+#include <mutex>
+#include <chrono>
+
 #include "can_mac_val.h"
 #include "pd_control.h"
 
@@ -80,23 +83,26 @@ void Brake_Pressure(CAN_AVL can_);                  // ID : 0x371, LEN : 8
 void WHL_Speed(CAN_AVL can_);                       // ID : 0x386, LEN : 8, km/h
 void WHL_PUL(CAN_AVL can_);                         // ID : 0x387, LEN : 6
 
-// pthread function
-void* CAN_RW(void *can_error_flag_);
+// thread function
+void CAN_RW(std::atomic<bool>& , bool);
 
 static BYTE CAN_alive_count = 0;
+std::mutex m;
 
 int main()
 {
     PD_CONTROL pd_control;
-    
-    int thr_id = 0;
-    pthread_t p_thread[1];
     int status;
+    
+    const auto wait_duration = std::chrono::milliseconds(10);
+
+    std::atomic<bool> running { true } ;
 
     // CAN Read Write
-    thr_id = pthread_create(&p_thread[0], NULL, CAN_RW, (void *)can_error_flag);
+    std::thread *th1;
+    th1 = new std::thread(CAN_RW, std::ref(running), can_error_flag);
 
-    while(1)
+    while(running)
     {
         /*
          차량 제어 코드 작성
@@ -109,24 +115,26 @@ int main()
             aReqMax_Cmd = aReqMax_Cmd > 5 ? 5 : aReqMax_Cmd;
             aReqMax_Cmd = aReqMax_Cmd < -5 ? -5 : aReqMax_Cmd;
         }
-        
-        usleep(1);
-        if(can_error_flag == true)  break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if(can_error_flag == true)
+        {
+            running = false;
+        }
     }
-    
-    pthread_join(p_thread[0], (void **) &status);
+    running = false;
+    th1->join();
 
     return 0;
 }
 
-void* CAN_RW(void *can_error_flag_)
+void CAN_RW(std::atomic<bool>& _running, bool can_error_flag_)
 {
     printf("can_error_flag : %d\n", can_error_flag_);
     
 #ifdef CAN_CONTROL_ENABLE
     CAN_AVL can_control(CONTROL_CAN_DEVICE, PCAN_BAUD_RATE);      // 제어 캔. write/read
     memset(&can_control.message, 0, sizeof(TPCANMsg));
-    can_control.PEAKCAN_TO_SOCKETCAN();
+    // can_control.PEAKCAN_TO_SOCKETCAN();
 #endif
     
 #ifdef CAN_CHASSIS_ENABLE
@@ -135,7 +143,7 @@ void* CAN_RW(void *can_error_flag_)
     can_chassis.PEAKCAN_TO_SOCKETCAN();
 #endif
     
-    while(1)
+    while(_running)
     {
         
 #ifdef CAN_CONTROL_ENABLE
@@ -158,9 +166,24 @@ void* CAN_RW(void *can_error_flag_)
         
         //        can_print(can_control);
         
-        if(can_control.frame.can_id == 0x710)  can_error_flag = Report_APM(can_control);
-        if(can_control.frame.can_id == 0x711)  can_error_flag = Report_ASM(can_control);
-        if(can_control.frame.can_id == 0x71f)  can_error_flag = Report_Misc(can_control);
+        if(can_control.frame.can_id == 0x710)  
+        {
+            m.lock();
+            can_error_flag = Report_APM(can_control);
+            m.unlock();
+        }
+        if(can_control.frame.can_id == 0x711) 
+        {
+            m.lock();
+            can_error_flag = Report_ASM(can_control);
+            m.unlock();
+        }
+        if(can_control.frame.can_id == 0x71f)  
+        {
+            m.lock();
+            can_error_flag = Report_Misc(can_control);
+            m.unlock();
+        }
         
         //////////////////////////////////////////////
         //////////////////////////////////////////////
@@ -195,7 +218,7 @@ void* CAN_RW(void *can_error_flag_)
 #endif
         
 
-        if((bool)can_error_flag_ == true)
+        if(can_error_flag_ == true)
             break;
         
         //        usleep(20000);
