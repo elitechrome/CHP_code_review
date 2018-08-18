@@ -1,0 +1,6 @@
+# Files in build folder
+build/*
+
+# Settings for VisualStudio Code
+.vscode/*
+
