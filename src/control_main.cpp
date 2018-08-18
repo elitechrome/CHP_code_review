@@ -108,7 +108,14 @@ int main()
 
     while(running)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::cout << "Put target speed and press enter : ";
+        std::cin >> target_vehicle_speed;
+        if(target_vehicle_speed < 0 || target_vehicle_speed >100)
+        {
+            target_vehicle_speed = 0;
+            std::cout << "invalid input, setting target speed to 0.\n";
+        }
+        //std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if(can_error_flag == true)
         {
             running = false;
