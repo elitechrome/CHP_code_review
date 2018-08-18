@@ -8,13 +8,13 @@
 #include <iostream>
 
 
+
 struct timer
 {
     timer(unsigned int delay, boost::asio::io_service* s_service, boost::function< void () > callback) :
     m_timer(*s_service),
     m_callback(callback),
-    m_delay(delay),
-    s_counter(0)
+    m_delay(delay)
     {
     }
 
@@ -39,7 +39,6 @@ struct timer
         m_callback();
     }
 
-    unsigned int s_counter;
     boost::asio::deadline_timer m_timer;
     boost::function< void () > m_callback;
     unsigned int m_delay;
