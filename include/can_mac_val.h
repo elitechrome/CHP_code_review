@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <memory>
 
 //#define PCAN_CHANNEL PCAN_USBBUS1
 //#define PCAN_BAUDRATE PCAN_BAUD_500K
@@ -33,6 +34,8 @@ public:
     unsigned char data[CAN_MAX_DLEN];   // peakcan과 같음
 };
 
+class CAN_AVL;
+typedef std::shared_ptr<CAN_AVL> CAN_AVLPtr;
 class CAN_AVL
 {
 public:
@@ -58,6 +61,8 @@ public:
 CAN_AVL::CAN_AVL(TPCANHandle dev_name_, TPCANHandle dev_baud_rate_)
 {
     CAN_INIT(dev_name_, dev_baud_rate_);
+    memset(&message, 0, sizeof(TPCANMsg));
+
 }
 
 void CAN_AVL::CAN_INIT(TPCANHandle dev_name_, TPCANHandle dev_baud_rate_)
