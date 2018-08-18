@@ -6,9 +6,11 @@
  */
 
 #include <iostream>
+#include <cstdio>
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <memory>
 
 #include "can_mac_val.h"
 #include "pd_control.h"
@@ -66,55 +68,46 @@ float K_d = 0.5;
 // CAN error flag (전역으로 선언)
 bool can_error_flag = 0;
 
+static BYTE CAN_alive_count = 0;
+static std::mutex m;
+static std::high_resolution_clock::time_point start;
+
 // Control CAN
 void Mo_Conf(CAN_AVL &can_);
 void Mo_Val(CAN_AVL &can_);
 bool Report_APM(CAN_AVL &can_);
 bool Report_ASM(CAN_AVL &can_);
 bool Report_Misc(CAN_AVL &can_);
-void can_print(CAN_AVL can_);
+void can_print(CAN_AVL &can_);
 
 // Chassis CAN
-void TCU_DVT13_Driving_Tq(CAN_AVL can_);            // ID : 0x162, LEN : 3
-void TCU_DCT13_Engine_RPM(CAN_AVL can_);            // ID : 0x162, LEN : 3
-void NEW_MSG_ENGINE(CAN_AVL can_);                  // ID : 0x240, LEN : 8, rpm
-void NEW_MSG_2_RPM_WITHOUT_ELECTRO(CAN_AVL can_);   // ID : 0x371, LEN : 8
-void Brake_Pressure(CAN_AVL can_);                  // ID : 0x371, LEN : 8
-void WHL_Speed(CAN_AVL can_);                       // ID : 0x386, LEN : 8, km/h
-void WHL_PUL(CAN_AVL can_);                         // ID : 0x387, LEN : 6
+void TCU_DVT13_Driving_Tq(CAN_AVL &can_);            // ID : 0x162, LEN : 3
+void TCU_DCT13_Engine_RPM(CAN_AVL &can_);            // ID : 0x162, LEN : 3
+void NEW_MSG_ENGINE(CAN_AVL &can_);                  // ID : 0x240, LEN : 8, rpm
+void NEW_MSG_2_RPM_WITHOUT_ELECTRO(CAN_AVL &can_);   // ID : 0x371, LEN : 8
+void Brake_Pressure(CAN_AVL &can_);                  // ID : 0x371, LEN : 8
+void WHL_Speed(CAN_AVL &can_);                       // ID : 0x386, LEN : 8, km/h
+void WHL_PUL(CAN_AVL &can_);                         // ID : 0x387, LEN : 6
 
 // thread function
-void CAN_RW(std::atomic<bool>& , bool);
-
-static BYTE CAN_alive_count = 0;
-std::mutex m;
+void ControlCANRead(CAN_AVL&, std::atomic<bool>& , bool);
+void ControlCANWrite(CAN_AVL&, std::atomic<bool>& , bool);
+void ChassisCANRead(CAN_AVL&, std::atomic<bool>& , bool);
+void ChassisCANWrite(CAN_AVL&, std::atomic<bool>& , bool);
 
 int main()
 {
-    PD_CONTROL pd_control;
     int status;
-    
-    const auto wait_duration = std::chrono::milliseconds(10);
-
     std::atomic<bool> running { true } ;
+    CAN_AVL can_control(CONTROL_CAN_DEVICE, PCAN_BAUD_RATE);
 
-    // CAN Read Write
-    std::thread *th1;
-    th1 = new std::thread(CAN_RW, std::ref(running), can_error_flag);
+    // CAN Read
+    std::thread thControlCANRead = std::thread(ControlCANRead, can_control, std::ref(running), can_error_flag);
+    // CAN Write 
+    std::thread thControlCANWrite = std::thread(ControlCANWrite, can_control, std::ref(running), can_error_flag);
 
     while(running)
     {
-        /*
-         차량 제어 코드 작성
-         */
-        
-        // S_t, K_p, K_d는 상수, S_r은 실시간 CAN receive data. S_r에 뮤텍스 들어갈 수 도 있음.
-        if(speed_pid_control_enable_flag == 1)
-        {
-            aReqMax_Cmd = pd_control.MV_Cal_Func(target_vehicle_speed, real_vehicle_speed, K_p, K_d);
-            aReqMax_Cmd = aReqMax_Cmd > 5 ? 5 : aReqMax_Cmd;
-            aReqMax_Cmd = aReqMax_Cmd < -5 ? -5 : aReqMax_Cmd;
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if(can_error_flag == true)
         {
@@ -122,45 +115,22 @@ int main()
         }
     }
     running = false;
-    th1->join();
 
+    thControlCANRead.join();
+    thControlCANWrite.join();
+    
     return 0;
 }
 
-void CAN_RW(std::atomic<bool>& _running, bool can_error_flag_)
+void ControlCANRead(CAN_AVL& can_control, std::atomic<bool>& _running, bool can_error_flag_)
 {
     printf("can_error_flag : %d\n", can_error_flag_);
     
-#ifdef CAN_CONTROL_ENABLE
-    CAN_AVL can_control(CONTROL_CAN_DEVICE, PCAN_BAUD_RATE);      // 제어 캔. write/read
-    memset(&can_control.message, 0, sizeof(TPCANMsg));
     // can_control.PEAKCAN_TO_SOCKETCAN();
-#endif
-    
-#ifdef CAN_CHASSIS_ENABLE
-    CAN_AVL can_chassis(CHASSIS_CAN_DEVICE, PCAN_BAUD_RATE);      // 샤시 캔. only read
-    memset(&can_chassis.message, 0, sizeof(TPCANMsg));
-    can_chassis.PEAKCAN_TO_SOCKETCAN();
-#endif
+
     
     while(_running)
     {
-        
-#ifdef CAN_CONTROL_ENABLE
-        //////////////////////////////////////////////
-        ////////////////  can_control  ///////////////
-        //////////////////////////////////////////////
-        
-        // 초기화
-        // 0x156 값넣고
-        Mo_Conf(can_control);   // id 0x156
-        // write
-        
-        // 초기화
-        // 0x157 값 넣고
-        Mo_Val(can_control);    // id 0x157
-        // write
-        
         //        can_control.can_memset();
         can_control.can_read();
         
@@ -185,21 +155,56 @@ void CAN_RW(std::atomic<bool>& _running, bool can_error_flag_)
             m.unlock();
         }
         
-        //////////////////////////////////////////////
-        //////////////////////////////////////////////
-        //////////////////////////////////////////////
-#endif
+        if(can_error_flag_ == true)
+            break;
+    }
+}
+
+
+void ControlCANWrite(CAN_AVL& can_control, std::atomic<bool>& _running, bool can_error_flag_)
+{
+    PD_CONTROL pd_control;
+    while(_running)
+    {
+         /*
+         차량 제어 코드 작성
+         */
         
+        // S_t, K_p, K_d는 상수, S_r은 실시간 CAN receive data. S_r에 뮤텍스 들어갈 수 도 있음.
+        if(speed_pid_control_enable_flag == 1)
+        {
+            m.lock();
+            aReqMax_Cmd = pd_control.MV_Cal_Func(target_vehicle_speed, real_vehicle_speed, K_p, K_d);
+            m.unlock();
+            aReqMax_Cmd = aReqMax_Cmd > 5 ? 5 : aReqMax_Cmd;
+            aReqMax_Cmd = aReqMax_Cmd < -5 ? -5 : aReqMax_Cmd;
+        }
+        // 초기화
+        // 0x156 값넣고
+        Mo_Conf(can_control);   // id 0x156
+        // write
         
+        // 초기화
+        // 0x157 값 넣고
+        Mo_Val(can_control);    // id 0x157
+        // write
         
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    }
         
-        
-        
-#ifdef CAN_CHASSIS_ENABLE
-        //////////////////////////////////////////////
-        //////////////// can_chassis /////////////////
-        //////////////////////////////////////////////
-        
+}
+void ChassisCANRead(CAN_AVL& can_control, std::atomic<bool>& _running, bool can_error_flag_)
+{
+    printf("can_error_flag : %d\n", can_error_flag_);
+
+    CAN_AVL can_chassis(CHASSIS_CAN_DEVICE, PCAN_BAUD_RATE);      // 샤시 캔. only read
+    memset(&can_chassis.message, 0, sizeof(TPCANMsg));
+    can_chassis.PEAKCAN_TO_SOCKETCAN();
+
+    
+    while(_running)
+    {
         //can_chassis.can_memset();
         can_chassis.can_read();
         
@@ -211,23 +216,14 @@ void CAN_RW(std::atomic<bool>& _running, bool can_error_flag_)
         if(can_chassis.frame.can_id == 0x386) WHL_Speed(can_chassis);
         if(can_chassis.frame.can_id == 0x387) WHL_PUL(can_chassis);
         
-        
-        //////////////////////////////////////////////
-        //////////////////////////////////////////////
-        //////////////////////////////////////////////
-#endif
-        
-
         if(can_error_flag_ == true)
             break;
-        
-        //        usleep(20000);
     }
-    
-    //return 0; // 원래는 해줘야함. return (void *)value;
 }
 
-
+void ChassisCANWrite(CAN_AVL& can_control, std::atomic<bool>& _running, bool can_error_flag_)
+{
+}
 void Mo_Conf(CAN_AVL &can_)
 {
     
@@ -340,8 +336,18 @@ bool Report_ASM(CAN_AVL &can_)      // id = 0x711
     if(print_vehicle_speed_flag == 1)    printf("Vehicle Speed \t\t: %d\n", ASM_Fd_VSpeed_);
     if(print_alive_count_flag == 1)    printf("Alive-count value \t\t: %d\n", Mo_Fd_AlvCnt_);
     
-    if(speed_pid_control_enable_flag == 1) real_vehicle_speed = ASM_Fd_VSpeed_;
-    if(print_cluster_speed_display_flag == 1) cluster_speed_display_value = ASM_Fd_VSpeed_;
+    if(speed_pid_control_enable_flag == 1) 
+    {
+        m.lock();
+        real_vehicle_speed = ASM_Fd_VSpeed_;
+        m.unlock();
+    }
+    if(print_cluster_speed_display_flag == 1) 
+    {
+        m.lock();
+        cluster_speed_display_value = ASM_Fd_VSpeed_;
+        m.unlock();
+    }
     //printf("APM_Fd_En_ \t= %d \t\t APM_Fd_Override \t=%d\n", APM_Fd_En_, APM_Fd_Override);
     
     return can_error_flag_;
